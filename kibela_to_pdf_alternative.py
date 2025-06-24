@@ -208,6 +208,8 @@ class KibelaToPDFConverter:
             return ""
         # Unescape HTML entities
         text = html.unescape(text)
+        # Remove zero-width characters and other problematic Unicode characters
+        text = re.sub(r'[\u200b-\u200f\u2028-\u202f\u205f-\u206f\ufeff]', '', text)
         # Remove extra whitespace
         text = re.sub(r'\s+', ' ', text).strip()
         return text
@@ -274,10 +276,15 @@ class KibelaToPDFConverter:
                     elements.append(Spacer(1, 12))
             
             elif element.name in ['ul', 'ol']:
+                counter = 1
                 for li in element.find_all('li', recursive=False):
                     text = self.clean_text(li.get_text())
                     if text:
-                        bullet = "• " if element.name == 'ul' else "1. "
+                        if element.name == 'ul':
+                            bullet = "• "
+                        else:
+                            bullet = f"{counter}. "
+                            counter += 1
                         elements.append(Paragraph(f"{bullet}{text}", self.styles['Normal']))
                         elements.append(Spacer(1, 3))
                 elements.append(Spacer(1, 6))
