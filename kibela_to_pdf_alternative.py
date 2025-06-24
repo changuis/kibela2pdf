@@ -20,13 +20,41 @@ import html2text
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image, Preformatted
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_LEFT, TA_CENTER
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+from reportlab.platypus.flowables import Flowable
+from reportlab.pdfgen import canvas
 import html
+import urllib.request
+import urllib.parse
+from PIL import Image as PILImage
+import io
+
+
+class LinkFlowable(Flowable):
+    """Custom flowable for creating clickable links"""
+    def __init__(self, text, url, style):
+        Flowable.__init__(self)
+        self.text = text
+        self.url = url
+        self.style = style
+        # Calculate dimensions
+        from reportlab.pdfbase.pdfmetrics import stringWidth
+        self.width = stringWidth(text, style.fontName, style.fontSize)
+        self.height = style.fontSize
+
+    def draw(self):
+        # Draw the text in blue
+        self.canv.setFillColor(colors.blue)
+        self.canv.setFont(self.style.fontName, self.style.fontSize)
+        self.canv.drawString(0, 0, self.text)
+        
+        # Add link annotation
+        self.canv.linkURL(self.url, (0, 0, self.width, self.height))
 
 
 class KibelaToPDFConverter:
@@ -125,6 +153,22 @@ class KibelaToPDFConverter:
         # Update Normal style for Japanese text
         self.styles['Normal'].fontName = japanese_font
         
+        # Add custom code style
+        self.styles.add(ParagraphStyle(
+            name='CustomCode',
+            parent=self.styles['Normal'],
+            fontSize=9,
+            fontName='Courier',
+            backgroundColor=colors.lightgrey,
+            leftIndent=12,
+            rightIndent=12,
+            spaceAfter=6,
+            spaceBefore=6,
+            borderWidth=1,
+            borderColor=colors.grey,
+            borderPadding=6
+        ))
+        
         # Store font names for table use
         self.japanese_font = japanese_font
         self.japanese_font_bold = japanese_font_bold
@@ -214,10 +258,220 @@ class KibelaToPDFConverter:
         text = re.sub(r'\s+', ' ', text).strip()
         return text
 
+    def process_element_with_links(self, element):
+        """Process element content while preserving links as separate flowables"""
+        elements = []
+        
+        # Check if this element contains links
+        links = element.find_all('a')
+        if not links:
+            # No links, just return regular text
+            text = self.clean_text(element.get_text())
+            if text:
+                return [Paragraph(text, self.styles['Normal'])]
+            return []
+        
+        # Process mixed content with links
+        current_text = ""
+        
+        for child in element.children:
+            if hasattr(child, 'name'):
+                if child.name == 'a':
+                    # Add any accumulated text before the link
+                    if current_text.strip():
+                        elements.append(Paragraph(self.clean_text(current_text), self.styles['Normal']))
+                        current_text = ""
+                    
+                    # Create link flowable
+                    link_text = self.clean_text(child.get_text())
+                    link_url = child.get('href', '')
+                    if link_text and link_url:
+                        elements.append(LinkFlowable(link_text, link_url, self.styles['Normal']))
+                    elif link_text:
+                        elements.append(Paragraph(link_text, self.styles['Normal']))
+                else:
+                    # Other HTML elements, accumulate text
+                    current_text += self.clean_text(child.get_text())
+            else:
+                # Text node, accumulate
+                current_text += self.clean_text(str(child))
+        
+        # Add any remaining text
+        if current_text.strip():
+            elements.append(Paragraph(self.clean_text(current_text), self.styles['Normal']))
+        
+        return elements
+
+    def process_text_with_links(self, element):
+        """Process text content while preserving links (for table cells)"""
+        result = []
+        
+        # Process all child nodes
+        for child in element.children:
+            if hasattr(child, 'name'):
+                if child.name == 'a':
+                    # This is a link
+                    link_text = self.clean_text(child.get_text())
+                    link_url = child.get('href', '')
+                    if link_text and link_url:
+                        # Create a Paragraph with clickable link for table cells
+                        return Paragraph(f'<a href="{link_url}" color="blue"><u>{link_text}</u></a>', self.styles['Normal'])
+                    elif link_text:
+                        result.append(link_text)
+                else:
+                    # Other HTML elements, just get text
+                    result.append(self.clean_text(child.get_text()))
+            else:
+                # Text node
+                result.append(self.clean_text(str(child)))
+        
+        return ''.join(result)
+
+    def download_image(self, img_url, image_counter=None):
+        """Download image and return ReportLab Image object"""
+        try:
+            # Check if we should use local PNG files instead of processing the URL
+            if image_counter is not None:
+                local_png_path = f"{image_counter}.png"
+                if os.path.exists(local_png_path):
+                    print(f"Using local PNG file: {local_png_path}")
+                    
+                    # Load the local PNG file
+                    pil_img = PILImage.open(local_png_path)
+                    
+                    # Convert to RGB if necessary (for RGBA, P mode images)
+                    if pil_img.mode in ('RGBA', 'P'):
+                        pil_img = pil_img.convert('RGB')
+                    
+                    # Save to bytes as JPEG
+                    img_buffer = io.BytesIO()
+                    pil_img.save(img_buffer, format='JPEG', quality=85)
+                    img_buffer.seek(0)
+                    
+                    # Create ReportLab Image from the buffer
+                    img = Image(img_buffer)
+                    
+                    # Scale image to fit page width (max 400 points)
+                    max_width = 400
+                    max_height = 300
+                    
+                    # Get original dimensions
+                    orig_width, orig_height = pil_img.size
+                    
+                    # Calculate scaling factor
+                    scale_w = max_width / orig_width if orig_width > max_width else 1
+                    scale_h = max_height / orig_height if orig_height > max_height else 1
+                    scale = min(scale_w, scale_h)
+                    
+                    img.drawWidth = orig_width * scale
+                    img.drawHeight = orig_height * scale
+                    
+                    print(f"Successfully processed local image: {orig_width}x{orig_height} -> {img.drawWidth:.0f}x{img.drawHeight:.0f}")
+                    return img
+            
+            # Fallback to original logic if no local file found
+            is_svg = False
+            
+            # Handle data URLs (base64 encoded images)
+            if img_url.startswith('data:'):
+                import base64
+                # Extract the base64 data
+                if ';base64,' in img_url:
+                    header, data = img_url.split(';base64,')
+                    # Check if it's an SVG
+                    if 'svg' in header.lower():
+                        is_svg = True
+                    img_data = base64.b64decode(data)
+                else:
+                    print(f"Warning: Unsupported data URL format: {img_url[:50]}...")
+                    return Paragraph(f"[Image: data URL]", self.styles['Normal'])
+            else:
+                # Handle relative URLs
+                if img_url.startswith('/'):
+                    img_url = f"https://{self.kibela_team}.kibe.la{img_url}"
+                elif not img_url.startswith('http'):
+                    img_url = f"https://{self.kibela_team}.kibe.la/{img_url}"
+                
+                # Check if it's an SVG file
+                if img_url.lower().endswith('.svg'):
+                    is_svg = True
+                
+                # Add authorization headers for Kibela images
+                req = urllib.request.Request(img_url)
+                req.add_header('Authorization', f'Bearer {self.kibela_token}')
+                req.add_header('User-Agent', 'KibelaToPDFConverter/1.0')
+                
+                # Create SSL context that doesn't verify certificates (for development)
+                import ssl
+                ssl_context = ssl.create_default_context()
+                ssl_context.check_hostname = False
+                ssl_context.verify_mode = ssl.CERT_NONE
+                
+                with urllib.request.urlopen(req, context=ssl_context) as response:
+                    img_data = response.read()
+            
+            # Handle SVG files
+            if is_svg:
+                try:
+                    import cairosvg
+                    # Convert SVG to PNG with white background to handle transparency
+                    png_data = cairosvg.svg2png(bytestring=img_data, background_color='white')
+                    img_data = png_data
+                    print(f"Successfully converted SVG to PNG: {img_url[:50]}...")
+                except ImportError:
+                    print(f"Warning: cairosvg not available, skipping SVG: {img_url[:50]}...")
+                    return Paragraph("📷 [SVG Image - cairosvg not installed]", self.styles['Normal'])
+                except Exception as e:
+                    print(f"Warning: Could not convert SVG: {e}")
+                    return Paragraph("📷 [SVG Image - conversion failed]", self.styles['Normal'])
+            
+            # Create PIL Image to get dimensions and convert if needed
+            pil_img = PILImage.open(io.BytesIO(img_data))
+            
+            # Skip very small images (likely placeholders)
+            if pil_img.size[0] < 10 or pil_img.size[1] < 10:
+                return Paragraph("[Small placeholder image]", self.styles['Normal'])
+            
+            # Convert to RGB if necessary (for RGBA, P mode images)
+            if pil_img.mode in ('RGBA', 'P'):
+                pil_img = pil_img.convert('RGB')
+            
+            # Save to bytes as JPEG
+            img_buffer = io.BytesIO()
+            pil_img.save(img_buffer, format='JPEG', quality=85)
+            img_buffer.seek(0)
+            
+            # Create ReportLab Image from the buffer
+            img = Image(img_buffer)
+            
+            # Scale image to fit page width (max 400 points)
+            max_width = 400
+            max_height = 300
+            
+            # Get original dimensions
+            orig_width, orig_height = pil_img.size
+            
+            # Calculate scaling factor
+            scale_w = max_width / orig_width if orig_width > max_width else 1
+            scale_h = max_height / orig_height if orig_height > max_height else 1
+            scale = min(scale_w, scale_h)
+            
+            img.drawWidth = orig_width * scale
+            img.drawHeight = orig_height * scale
+            
+            print(f"Successfully processed image: {orig_width}x{orig_height} -> {img.drawWidth:.0f}x{img.drawHeight:.0f}")
+            return img
+            
+        except Exception as e:
+            print(f"Warning: Could not process image {img_url[:50]}...: {e}")
+            # Return a placeholder text instead
+            return Paragraph(f"[Image could not be loaded]", self.styles['Normal'])
+
     def parse_html_to_elements(self, html_content):
         """Parse HTML content and convert to ReportLab elements"""
         soup = BeautifulSoup(html_content, 'html.parser')
         elements = []
+        image_counter = 1  # Counter for local PNG files
         
         # Remove unwanted elements
         for element in soup.find_all(['script', 'style', 'meta']):
@@ -249,9 +503,25 @@ class KibelaToPDFConverter:
                     elements.append(Spacer(1, 6))
             
             elif element.name == 'p':
-                text = self.clean_text(element.get_text())
-                if text:
-                    elements.append(Paragraph(text, self.styles['Normal']))
+                # Process paragraph with potential links
+                text_with_links = self.process_text_with_links(element)
+                if text_with_links:
+                    elements.append(Paragraph(text_with_links, self.styles['Normal']))
+                    elements.append(Spacer(1, 6))
+            
+            elif element.name == 'img':
+                img_src = element.get('src')
+                if img_src:
+                    img_element = self.download_image(img_src, image_counter)
+                    elements.append(img_element)
+                    elements.append(Spacer(1, 6))
+                    image_counter += 1  # Increment for next image
+            
+            elif element.name in ['pre', 'code']:
+                code_text = element.get_text()
+                if code_text:
+                    # Use Preformatted for code blocks to preserve formatting
+                    elements.append(Preformatted(code_text, self.styles['CustomCode']))
                     elements.append(Spacer(1, 6))
             
             elif element.name == 'table':
@@ -299,8 +569,11 @@ class KibelaToPDFConverter:
         for tr in table_element.find_all('tr'):
             row = []
             for cell in tr.find_all(['td', 'th']):
-                text = self.clean_text(cell.get_text())
-                row.append(text)
+                # Process cell content with potential links
+                cell_content = self.process_text_with_links(cell)
+                if not cell_content:
+                    cell_content = self.clean_text(cell.get_text())
+                row.append(cell_content)
             if row:  # Only add non-empty rows
                 rows.append(row)
         

@@ -13,5 +13,9 @@ if [ -z "$KIBELA_TOKEN" ] || [ -z "$KIBELA_TEAM" ]; then
     exit 1
 fi
 
-# Run the ReportLab version
-python3 "$SCRIPT_DIR/kibela_to_pdf_alternative.py" "$@"
+# Set Cairo library path for macOS Homebrew (for SVG support)
+export DYLD_LIBRARY_PATH="/opt/homebrew/opt/cairo/lib:/usr/local/opt/cairo/lib:$DYLD_LIBRARY_PATH"
+export PKG_CONFIG_PATH="/opt/homebrew/opt/cairo/lib/pkgconfig:/usr/local/opt/cairo/lib/pkgconfig:$PKG_CONFIG_PATH"
+
+# Use exec to start a fresh Python process with the new environment
+exec python3 "$SCRIPT_DIR/kibela_to_pdf_alternative.py" "$@"
