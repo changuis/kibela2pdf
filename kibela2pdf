@@ -1,0 +1,17 @@
+#!/bin/bash
+# Kibela to PDF Converter - Simple wrapper script
+# This script automatically uses the ReportLab version for better macOS compatibility
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Check if environment variables are set
+if [ -z "$KIBELA_TOKEN" ] || [ -z "$KIBELA_TEAM" ]; then
+    echo "Error: KIBELA_TOKEN and KIBELA_TEAM environment variables must be set"
+    echo "Please add the following to your .zshrc:"
+    echo "export KIBELA_TOKEN=your_kibela_api_token"
+    echo "export KIBELA_TEAM=your_team_name"
+    exit 1
+fi
+
+# Run the ReportLab version
+python3 "$SCRIPT_DIR/kibela_to_pdf_alternative.py" "$@"
