@@ -303,10 +303,17 @@ class KibelaToPDFConverter:
         return elements
 
     def process_text_with_links(self, element):
-        """Process text content while preserving links (for table cells)"""
-        result = []
+        """Process text content while preserving links (for paragraphs and table cells)"""
+        # Check if this element contains links
+        links = element.find_all('a')
+        if not links:
+            # No links, just return regular text
+            text = self.clean_text(element.get_text())
+            return text if text else ""
         
-        # Process all child nodes
+        # Process mixed content with links
+        result_parts = []
+        
         for child in element.children:
             if hasattr(child, 'name'):
                 if child.name == 'a':
@@ -314,18 +321,19 @@ class KibelaToPDFConverter:
                     link_text = self.clean_text(child.get_text())
                     link_url = child.get('href', '')
                     if link_text and link_url:
-                        # Create a Paragraph with clickable link for table cells
-                        return Paragraph(f'<a href="{link_url}" color="blue"><u>{link_text}</u></a>', self.styles['Normal'])
+                        # Create clickable link markup
+                        result_parts.append(f'<a href="{link_url}" color="blue"><u>{link_text}</u></a>')
                     elif link_text:
-                        result.append(link_text)
+                        result_parts.append(link_text)
                 else:
                     # Other HTML elements, just get text
-                    result.append(self.clean_text(child.get_text()))
+                    result_parts.append(self.clean_text(child.get_text()))
             else:
                 # Text node
-                result.append(self.clean_text(str(child)))
+                result_parts.append(self.clean_text(str(child)))
         
-        return ''.join(result)
+        # Join all parts and return as a single string for Paragraph processing
+        return ''.join(result_parts)
 
     def download_image(self, img_url, image_counter=None):
         """Download image and return ReportLab Image object"""
@@ -472,12 +480,20 @@ class KibelaToPDFConverter:
         soup = BeautifulSoup(html_content, 'html.parser')
         elements = []
         image_counter = 1  # Counter for local PNG files
+        ol_counter = 1  # Counter for ordered lists that resets per section
+        processed_elements = set()  # Track processed elements to avoid duplication
         
         # Remove unwanted elements
         for element in soup.find_all(['script', 'style', 'meta']):
             element.decompose()
         
+        # Remove debug output for production
+        
         for element in soup.find_all(True):
+            # Skip if this element has already been processed (to avoid duplication)
+            if id(element) in processed_elements:
+                continue
+            processed_elements.add(id(element))
             if element.name == 'h1':
                 text = self.clean_text(element.get_text())
                 if text:
@@ -487,6 +503,8 @@ class KibelaToPDFConverter:
             elif element.name == 'h2':
                 text = self.clean_text(element.get_text())
                 if text:
+                    # Reset ordered list counter for new section
+                    ol_counter = 1
                     elements.append(Paragraph(text, self.styles['CustomHeading2']))
                     elements.append(Spacer(1, 6))
             
@@ -509,6 +527,13 @@ class KibelaToPDFConverter:
                     elements.append(Paragraph(text_with_links, self.styles['Normal']))
                     elements.append(Spacer(1, 6))
             
+            elif element.name in ['div', 'span'] and not element.find_parent(['p', 'li', 'td', 'th']):
+                # Process div/span elements that might contain links and aren't already processed
+                text_with_links = self.process_text_with_links(element)
+                if text_with_links:
+                    elements.append(Paragraph(text_with_links, self.styles['Normal']))
+                    elements.append(Spacer(1, 6))
+            
             elif element.name == 'img':
                 img_src = element.get('src')
                 if img_src:
@@ -520,6 +545,11 @@ class KibelaToPDFConverter:
             elif element.name in ['pre', 'code']:
                 code_text = element.get_text()
                 if code_text:
+                    # Check if this is a nested code element inside a pre element
+                    # Skip if parent is already a pre element to avoid duplication
+                    if element.name == 'code' and element.parent and element.parent.name == 'pre':
+                        continue
+                    
                     # Use Preformatted for code blocks to preserve formatting
                     elements.append(Preformatted(code_text, self.styles['CustomCode']))
                     elements.append(Spacer(1, 6))
@@ -546,16 +576,28 @@ class KibelaToPDFConverter:
                     elements.append(Spacer(1, 12))
             
             elif element.name in ['ul', 'ol']:
-                counter = 1
                 for li in element.find_all('li', recursive=False):
-                    text = self.clean_text(li.get_text())
-                    if text:
+                    # Check if this li contains images
+                    li_images = li.find_all('img')
+                    
+                    # Process images within this list item first
+                    for img in li_images:
+                        img_src = img.get('src')
+                        if img_src:
+                            img_element = self.download_image(img_src, image_counter)
+                            elements.append(img_element)
+                            elements.append(Spacer(1, 6))
+                            image_counter += 1
+                    
+                    # Process the text content with potential links
+                    text_with_links = self.process_text_with_links(li)
+                    if text_with_links:
                         if element.name == 'ul':
                             bullet = "• "
                         else:
-                            bullet = f"{counter}. "
-                            counter += 1
-                        elements.append(Paragraph(f"{bullet}{text}", self.styles['Normal']))
+                            bullet = f"{ol_counter}. "
+                            ol_counter += 1
+                        elements.append(Paragraph(f"{bullet}{text_with_links}", self.styles['Normal']))
                         elements.append(Spacer(1, 3))
                 elements.append(Spacer(1, 6))
         
