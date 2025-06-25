@@ -153,12 +153,12 @@ class KibelaToPDFConverter:
         # Update Normal style for Japanese text
         self.styles['Normal'].fontName = japanese_font
         
-        # Add custom code style
+        # Add custom code style - use Japanese font for code blocks too
         self.styles.add(ParagraphStyle(
             name='CustomCode',
             parent=self.styles['Normal'],
             fontSize=9,
-            fontName='Courier',
+            fontName=japanese_font,  # Use Japanese font instead of Courier
             backgroundColor=colors.lightgrey,
             leftIndent=12,
             rightIndent=12,
@@ -246,16 +246,28 @@ class KibelaToPDFConverter:
         
         return data['data']['noteFromPath']
 
-    def clean_text(self, text):
+    def clean_text(self, text, preserve_whitespace=False):
         """Clean text for PDF generation"""
         if not text:
             return ""
+        
         # Unescape HTML entities
         text = html.unescape(text)
+        
         # Remove zero-width characters and other problematic Unicode characters
-        text = re.sub(r'[\u200b-\u200f\u2028-\u202f\u205f-\u206f\ufeff]', '', text)
-        # Remove extra whitespace
-        text = re.sub(r'\s+', ' ', text).strip()
+        # But be more conservative to avoid corrupting legitimate content
+        text = re.sub(r'[\u200b-\u200d\u2060\ufeff]', '', text)
+        
+        if preserve_whitespace:
+            # For code blocks, preserve original formatting
+            # Only remove leading/trailing whitespace from each line
+            lines = text.split('\n')
+            cleaned_lines = [line.rstrip() for line in lines]
+            return '\n'.join(cleaned_lines)
+        else:
+            # For regular text, normalize whitespace
+            text = re.sub(r'\s+', ' ', text).strip()
+        
         return text
 
     def process_element_with_links(self, element):
@@ -550,8 +562,11 @@ class KibelaToPDFConverter:
                     if element.name == 'code' and element.parent and element.parent.name == 'pre':
                         continue
                     
+                    # Clean code text while preserving whitespace and formatting
+                    cleaned_code = self.clean_text(code_text, preserve_whitespace=True)
+                    
                     # Use Preformatted for code blocks to preserve formatting
-                    elements.append(Preformatted(code_text, self.styles['CustomCode']))
+                    elements.append(Preformatted(cleaned_code, self.styles['CustomCode']))
                     elements.append(Spacer(1, 6))
             
             elif element.name == 'table':
